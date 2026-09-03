@@ -3,7 +3,6 @@
 #include <iomanip>
 #include <iostream>
 #include <string>
-#include <vector>
 #include <chrono>
 #include <thread>
 
@@ -18,10 +17,12 @@ const int MAX_THREADS = 22;
 
 const int RUNS_PER_THREAD = 3;
 
-const std::string RLE_EXE = "rle.exe";
+const int DATASET_COUNT = 15;
+
+const std::string LZ77_EXE = "lz77.exe";
 
 // ============================================================
-// HELPER
+// HELPER — PROGRESS BAR
 // ============================================================
 
 void printProgress(
@@ -31,8 +32,7 @@ void printProgress(
     const int barWidth = 50;
 
     double progress =
-        static_cast<double>(completed)
-        /
+        static_cast<double>(completed) /
         static_cast<double>(total);
 
     int filled =
@@ -42,11 +42,7 @@ void printProgress(
 
     std::cout << "\r[";
 
-    for (
-        int i = 0;
-        i < barWidth;
-        ++i
-    ) {
+    for (int i = 0; i < barWidth; ++i) {
 
         if (i < filled) {
             std::cout << '#';
@@ -61,35 +57,32 @@ void printProgress(
         << std::fixed
         << std::setprecision(1)
         << progress * 100.0
-        << "% "
-
-        << "("
+        << "% ("
         << completed
         << "/"
         << total
         << ")"
-
         << std::flush;
 }
 
 // ============================================================
-// RUN RLE
+// RUN LZ77
 // ============================================================
 
-bool runRLE(
+bool runLZ77(
     int threads
 ) {
     /*
-        Your existing rle.exe asks for the number
-        of threads.
+        lz77.exe asks the user:
 
-        This pipes the thread count into stdin.
+            Enter number of threads:
+
+        We automatically provide the requested
+        thread count through stdin.
 
         Equivalent to manually entering:
 
             4
-
-        when rle.exe starts.
     */
 
 #ifdef _WIN32
@@ -101,7 +94,7 @@ bool runRLE(
         +
         " | "
         +
-        RLE_EXE;
+        LZ77_EXE;
 
 #else
 
@@ -112,7 +105,7 @@ bool runRLE(
         +
         "\\n\" | "
         +
-        RLE_EXE;
+        LZ77_EXE;
 
 #endif
 
@@ -139,36 +132,40 @@ int main()
         std::cout
             << "\n"
             << "============================================================\n"
-            << "RLE 3-RUN THREAD SCALING EXPERIMENT\n"
+            << "LZ77 3-RUN THREAD SCALING EXPERIMENT\n"
             << "============================================================\n\n";
 
         std::cout
-            << "Datasets:              15\n"
+            << "Datasets:              "
+            << DATASET_COUNT
+            << "\n"
+
             << "Thread counts:         "
             << MIN_THREADS
             << "-"
             << MAX_THREADS
             << "\n"
+
             << "Runs per thread count: "
             << RUNS_PER_THREAD
             << "\n\n";
 
+        // ====================================================
+        // CALCULATE TOTALS
+        // ====================================================
+
         int threadCount =
-            MAX_THREADS
-            -
-            MIN_THREADS
-            +
+            MAX_THREADS -
+            MIN_THREADS +
             1;
 
         int totalRuns =
-            threadCount
-            *
+            threadCount *
             RUNS_PER_THREAD;
 
         int totalDatasetMeasurements =
-            totalRuns
-            *
-            15;
+            totalRuns *
+            DATASET_COUNT;
 
         std::cout
             << "Total benchmark runs: "
@@ -181,39 +178,44 @@ int main()
             << "\n\n";
 
         // ====================================================
-        // CHECK RLE
+        // CHECK LZ77 EXECUTABLE
         // ====================================================
 
         if (
             !fs::exists(
-                RLE_EXE
+                LZ77_EXE
             )
         ) {
 
             std::cerr
                 << "ERROR: Cannot find "
-                << RLE_EXE
+                << LZ77_EXE
                 << "\n\n";
 
             std::cerr
-                << "Make sure rle.exe is inside:\n"
+                << "Make sure lz77.exe is inside:\n"
                 << fs::current_path()
-                << "\n";
+                << "\n\n";
 
             return 1;
         }
 
         // ====================================================
-        // WARN USER
+        // WARNING
         // ====================================================
 
         std::cout
             << "IMPORTANT:\n"
-            << "This program will execute rle.exe "
+
+            << "This program will execute "
+            << LZ77_EXE
+            << " "
             << totalRuns
             << " times.\n\n"
 
-            << "Each execution processes all 15 datasets.\n\n"
+            << "Each execution processes all "
+            << DATASET_COUNT
+            << " datasets.\n\n"
 
             << "Previous results will NOT be deleted.\n\n";
 
@@ -225,7 +227,7 @@ int main()
         );
 
         // ====================================================
-        // PROGRESS
+        // PROGRESS TRACKING
         // ====================================================
 
         int completedRuns = 0;
@@ -236,14 +238,12 @@ int main()
             std::chrono::steady_clock::now();
 
         // ====================================================
-        // RUN EXPERIMENT
+        // THREAD COUNTS
         // ====================================================
 
         for (
-            int threads =
-                MIN_THREADS;
-            threads <=
-                MAX_THREADS;
+            int threads = MIN_THREADS;
+            threads <= MAX_THREADS;
             ++threads
         ) {
 
@@ -254,6 +254,10 @@ int main()
                 << threads
                 << "\n"
                 << "============================================================\n";
+
+            // =================================================
+            // REPEATED RUNS
+            // =================================================
 
             for (
                 int run = 1;
@@ -268,11 +272,15 @@ int main()
                     << RUNS_PER_THREAD
                     << "\n";
 
+                // ---------------------------------------------
+                // RUN TIMER
+                // ---------------------------------------------
+
                 auto start =
                     std::chrono::steady_clock::now();
 
                 bool success =
-                    runRLE(
+                    runLZ77(
                         threads
                     );
 
@@ -284,6 +292,10 @@ int main()
                         end - start
                     ).count();
 
+                // ---------------------------------------------
+                // UPDATE COUNTERS
+                // ---------------------------------------------
+
                 completedRuns++;
 
                 if (!success) {
@@ -293,9 +305,11 @@ int main()
                     std::cout
                         << "\n"
                         << "ERROR: Run failed.\n"
+
                         << "Threads: "
                         << threads
                         << "\n"
+
                         << "Run: "
                         << run
                         << "\n";
@@ -311,6 +325,10 @@ int main()
                         << " seconds.\n";
                 }
 
+                // ---------------------------------------------
+                // OVERALL PROGRESS
+                // ---------------------------------------------
+
                 printProgress(
                     completedRuns,
                     totalRuns
@@ -322,7 +340,7 @@ int main()
         }
 
         // ====================================================
-        // TOTAL TIME
+        // TOTAL EXPERIMENT TIME
         // ====================================================
 
         auto experimentEnd =
@@ -330,8 +348,7 @@ int main()
 
         double totalSeconds =
             std::chrono::duration<double>(
-                experimentEnd
-                -
+                experimentEnd -
                 experimentStart
             ).count();
 
@@ -342,7 +359,7 @@ int main()
         std::cout
             << "\n\n"
             << "============================================================\n"
-            << "RLE EXPERIMENT COMPLETE\n"
+            << "LZ77 EXPERIMENT COMPLETE\n"
             << "============================================================\n\n";
 
         std::cout
@@ -373,9 +390,8 @@ int main()
         std::cout
             << "Total dataset measurements: "
             << (
-                (totalRuns - failedRuns)
-                *
-                15
+                (totalRuns - failedRuns) *
+                DATASET_COUNT
             )
             << "\n";
 
@@ -387,14 +403,16 @@ int main()
             << " seconds\n";
 
         std::cout
-            << "\nResults are stored by rle.exe "
-            << "in the existing results directory.\n";
+            << "\nResults are stored by "
+            << LZ77_EXE
+            << " in the existing results directory.\n";
 
         std::cout
             << "\n============================================================\n";
 
         return 0;
     }
+
     catch (
         const std::exception& e
     ) {

@@ -1,2 +1,0 @@
-C:/Users/Arya/Desktop/Arya/c/testing/research-paper/build/CMakeFiles/edit_cache.dir
-C:/Users/Arya/Desktop/Arya/c/testing/research-paper/build/CMakeFiles/rebuild_cache.dir
