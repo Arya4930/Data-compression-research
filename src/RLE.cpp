@@ -1,13 +1,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <mutex>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -26,45 +25,52 @@ namespace fs = std::filesystem;
 
 constexpr int MAX_THREADS = 22;
 constexpr int TIMING_ITERATIONS = 100;
+constexpr int PROGRESS_WIDTH = 40;
 
 // ============================================================
 // DATASETS
-//
-// These match the 15 datasets from your current RLE results.
 // ============================================================
 
 const std::vector<std::string> DATASETS = {
-    "../datasets/aaa.txt",
-    "../datasets/alphabet.txt",
-    "../datasets/dickens",
-    "../datasets/mozilla",
-    "../datasets/mr",
-    "../datasets/nci",
-    "../datasets/ooffice",
-    "../datasets/osdb",
-    "../datasets/random.txt",
-    "../datasets/reymont",
-    "../datasets/samba",
-    "../datasets/sao",
-    "../datasets/webster",
-    "../datasets/x-ray",
-    "../datasets/xml"
+    "aaa.txt",
+    "alphabet.txt",
+    "dickens",
+    "mozilla",
+    "mr",
+    "nci",
+    "ooffice",
+    "osdb",
+    "random.txt",
+    "reymont",
+    "samba",
+    "sao",
+    "webster",
+    "x-ray",
+    "xml"
 };
 
 // ============================================================
-// RLE RUN
+// PATHS
+// ============================================================
+
+fs::path DATASET_DIR;
+fs::path RESULT_ROOT;
+fs::path RUN_DIR;
+fs::path COMPRESSED_DIR;
+fs::path LOG_DIR;
+
+// ============================================================
+// RLE STRUCTURES
 // ============================================================
 
 struct RLEPair {
+
     uint8_t value;
     uint64_t count;
 };
 
-// ============================================================
-// COMPRESSED DATA
-// ============================================================
-
 struct RLECompressed {
+
     std::vector<RLEPair> runs;
 };
 
@@ -75,7 +81,8 @@ struct RLECompressed {
 struct Result {
 
     std::string dataset;
-    std::string algorithm;
+
+    std::string algorithm = "RLE";
 
     int threads = 1;
 
@@ -99,20 +106,106 @@ struct Result {
 };
 
 // ============================================================
+// TIMESTAMP
+// ============================================================
+
+std::string getTimestamp()
+{
+    auto now =
+        std::chrono::system_clock::now();
+
+    std::time_t time =
+        std::chrono::system_clock::to_time_t(
+            now
+        );
+
+    std::tm tm{};
+
+#ifdef _WIN32
+
+    localtime_s(
+        &tm,
+        &time
+    );
+
+#else
+
+    localtime_r(
+        &time,
+        &tm
+    );
+
+#endif
+
+    std::ostringstream out;
+
+    out
+        << std::put_time(
+            &tm,
+            "%Y%m%d_%H%M%S"
+        );
+
+    return out.str();
+}
+
+// ============================================================
+// INITIALIZE PATHS
+// ============================================================
+
+void initializePaths()
+{
+    /*
+        RLE executable is expected to be run from:
+
+            research-paper/src
+
+        Therefore:
+
+            ../datasets
+            ../results
+    */
+
+    DATASET_DIR =
+        fs::absolute(
+            fs::path("../datasets")
+        );
+
+    RESULT_ROOT =
+        fs::absolute(
+            fs::path("../results")
+        );
+
+    if (!fs::exists(DATASET_DIR)) {
+
+        throw std::runtime_error(
+            "Dataset directory does not exist:\n"
+            + DATASET_DIR.string()
+        );
+    }
+
+    fs::create_directories(
+        RESULT_ROOT
+    );
+}
+
+// ============================================================
 // READ FILE
 // ============================================================
 
 std::vector<uint8_t> readFile(
-    const std::string& path
-) {
+    const fs::path& path
+)
+{
     std::ifstream file(
         path,
         std::ios::binary
     );
 
     if (!file) {
+
         throw std::runtime_error(
-            "Cannot open file: " + path
+            "Cannot open file:\n"
+            + path.string()
         );
     }
 
@@ -129,21 +222,27 @@ std::vector<uint8_t> readFile(
         std::ios::beg
     );
 
-    if (size < 0) {
-        throw std::runtime_error(
-            "Invalid file size: " + path
-        );
+    if (size <= 0) {
+
+        return {};
     }
 
     std::vector<uint8_t> data(
         static_cast<size_t>(size)
     );
 
-    if (size > 0) {
-
-        file.read(
-            reinterpret_cast<char*>(data.data()),
+    if (
+        !file.read(
+            reinterpret_cast<char*>(
+                data.data()
+            ),
             size
+        )
+    ) {
+
+        throw std::runtime_error(
+            "Failed to read file:\n"
+            + path.string()
         );
     }
 
@@ -156,7 +255,8 @@ std::vector<uint8_t> readFile(
 
 double calculateEntropy(
     const std::vector<uint8_t>& data
-) {
+)
+{
     if (data.empty()) {
         return 0.0;
     }
@@ -164,7 +264,8 @@ double calculateEntropy(
     uint64_t frequency[256] = {};
 
     for (uint8_t byte : data) {
-        frequency[byte]++;
+
+        ++frequency[byte];
     }
 
     double entropy = 0.0;
@@ -189,19 +290,22 @@ double calculateEntropy(
 
         entropy -=
             probability *
-            std::log2(probability);
+            std::log2(
+                probability
+            );
     }
 
     return entropy;
 }
 
 // ============================================================
-// SERIAL RLE
+// SERIAL COMPRESSION
 // ============================================================
 
 RLECompressed rleCompressSerial(
     const std::vector<uint8_t>& data
-) {
+)
+{
     RLECompressed result;
 
     if (data.empty()) {
@@ -250,7 +354,7 @@ RLECompressed rleCompressSerial(
 }
 
 // ============================================================
-// CHUNK RESULT
+// CHUNK
 // ============================================================
 
 struct ChunkResult {
@@ -262,7 +366,7 @@ struct ChunkResult {
 };
 
 // ============================================================
-// COMPRESS ONE CHUNK
+// COMPRESS CHUNK
 // ============================================================
 
 void compressChunk(
@@ -270,7 +374,8 @@ void compressChunk(
     size_t start,
     size_t end,
     ChunkResult& result
-) {
+)
+{
     result.start = start;
     result.end = end;
 
@@ -321,13 +426,16 @@ void compressChunk(
 
 RLECompressed mergeChunks(
     const std::vector<ChunkResult>& chunks
-) {
+)
+{
     RLECompressed result;
 
     size_t estimatedRuns = 0;
 
     for (const auto& chunk : chunks) {
-        estimatedRuns += chunk.runs.size();
+
+        estimatedRuns +=
+            chunk.runs.size();
     }
 
     result.runs.reserve(
@@ -362,236 +470,227 @@ RLECompressed mergeChunks(
 }
 
 // ============================================================
-// PERSISTENT COMPRESSION POOL
+// PARALLEL COMPRESSION
 // ============================================================
 
-class CompressionPool {
+RLECompressed rleCompressParallel(
+    const std::vector<uint8_t>& data,
+    int threads
+)
+{
+    if (data.empty()) {
+        return {};
+    }
 
-private:
+    threads =
+        std::max(
+            1,
+            threads
+        );
 
-    const std::vector<uint8_t>& data;
+    threads =
+        std::min<int>(
+            threads,
+            static_cast<int>(
+                data.size()
+            )
+        );
 
-    int threadCount;
+    if (threads == 1) {
 
-    std::vector<ChunkResult> chunks;
+        return rleCompressSerial(
+            data
+        );
+    }
+
+    std::vector<ChunkResult> chunks(
+        static_cast<size_t>(threads)
+    );
+
     std::vector<std::thread> workers;
 
-    std::mutex mutex;
+    workers.reserve(
+        threads
+    );
 
-    std::condition_variable startCV;
-    std::condition_variable doneCV;
-    std::condition_variable idleCV;
+    size_t n =
+        data.size();
 
-    bool stop = false;
+    for (
+        int t = 0;
+        t < threads;
+        ++t
+    ) {
 
-    uint64_t generation = 0;
-
-    int finishedWorkers = 0;
-
-public:
-
-    CompressionPool(
-        const std::vector<uint8_t>& input,
-        int threads
-    )
-        : data(input),
-          threadCount(
-              std::max(1, threads)
-          ),
-          chunks(
-              std::max(1, threads)
-          )
-    {
-        workers.reserve(
-            threadCount
-        );
-
-        for (
-            int i = 0;
-            i < threadCount;
-            ++i
-        ) {
-
-            workers.emplace_back(
-                &CompressionPool::workerLoop,
-                this,
-                i
-            );
-        }
-    }
-
-    ~CompressionPool()
-    {
-        {
-            std::lock_guard<std::mutex> lock(
-                mutex
+        size_t start =
+            (
+                n *
+                static_cast<size_t>(t)
+            )
+            /
+            static_cast<size_t>(
+                threads
             );
 
-            stop = true;
-            ++generation;
-        }
-
-        startCV.notify_all();
-
-        for (auto& worker : workers) {
-
-            if (worker.joinable()) {
-                worker.join();
-            }
-        }
-    }
-
-    RLECompressed compress()
-    {
-        uint64_t currentGeneration;
-
-        {
-            std::lock_guard<std::mutex> lock(
-                mutex
+        size_t end =
+            (
+                n *
+                static_cast<size_t>(t + 1)
+            )
+            /
+            static_cast<size_t>(
+                threads
             );
 
-            finishedWorkers = 0;
-
-            ++generation;
-
-            currentGeneration =
-                generation;
-        }
-
-        startCV.notify_all();
-
-        {
-            std::unique_lock<std::mutex> lock(
-                mutex
-            );
-
-            doneCV.wait(
-                lock,
-                [&]() {
-                    return
-                        finishedWorkers
-                        ==
-                        threadCount;
-                }
-            );
-        }
-
-        return mergeChunks(
-            chunks
-        );
-    }
-
-private:
-
-    void workerLoop(
-        int workerId
-    )
-    {
-        uint64_t lastGeneration = 0;
-
-        while (true) {
-
-            uint64_t myGeneration;
-
-            {
-                std::unique_lock<std::mutex> lock(
-                    mutex
-                );
-
-                startCV.wait(
-                    lock,
-                    [&]() {
-                        return
-                            stop
-                            ||
-                            generation
-                                !=
-                            lastGeneration;
-                    }
-                );
-
-                if (stop) {
-                    return;
-                }
-
-                myGeneration =
-                    generation;
-
-                lastGeneration =
-                    generation;
-            }
-
-            // ------------------------------------------------
-            // Calculate chunk boundaries
-            // ------------------------------------------------
-
-            size_t start =
-                (
-                    data.size()
-                    *
-                    static_cast<size_t>(
-                        workerId
-                    )
-                )
-                /
-                static_cast<size_t>(
-                    threadCount
-                );
-
-            size_t end =
-                (
-                    data.size()
-                    *
-                    static_cast<size_t>(
-                        workerId + 1
-                    )
-                )
-                /
-                static_cast<size_t>(
-                    threadCount
-                );
-
-            // ------------------------------------------------
-            // Compress chunk
-            // ------------------------------------------------
-
-            compressChunk(
-                data,
+        workers.emplace_back(
+            [
+                &data,
+                &chunks,
+                t,
                 start,
-                end,
-                chunks[workerId]
+                end
+            ] {
+
+                compressChunk(
+                    data,
+                    start,
+                    end,
+                    chunks[t]
+                );
+            }
+        );
+    }
+
+    for (auto& worker : workers) {
+
+        worker.join();
+    }
+
+    return mergeChunks(
+        chunks
+    );
+}
+
+// ============================================================
+// VARIABLE-LENGTH COUNT SIZE
+// ============================================================
+
+size_t encodedCountSize(
+    uint64_t value
+)
+{
+    size_t size = 1;
+
+    while (value >= 128) {
+
+        value >>= 7;
+        ++size;
+    }
+
+    return size;
+}
+
+// ============================================================
+// COMPRESSED SIZE
+// ============================================================
+
+uint64_t calculateCompressedSize(
+    const RLECompressed& compressed
+)
+{
+    uint64_t size = 0;
+
+    for (
+        const auto& run :
+        compressed.runs
+    ) {
+
+        size += 1;
+
+        size +=
+            encodedCountSize(
+                run.count
             );
+    }
 
-            // ------------------------------------------------
-            // Notify completion
-            // ------------------------------------------------
+    return size;
+}
 
-            {
-                std::lock_guard<std::mutex> lock(
-                    mutex
+// ============================================================
+// WRITE COMPRESSED FILE
+//
+// Format:
+//
+//     [1 byte value]
+//     [variable-length count]
+//
+// repeated for every run.
+// ============================================================
+
+void writeCompressedFile(
+    const fs::path& path,
+    const RLECompressed& compressed
+)
+{
+    std::ofstream file(
+        path,
+        std::ios::binary
+    );
+
+    if (!file) {
+
+        throw std::runtime_error(
+            "Cannot create compressed file:\n"
+            + path.string()
+        );
+    }
+
+    for (
+        const auto& run :
+        compressed.runs
+    ) {
+
+        file.put(
+            static_cast<char>(
+                run.value
+            )
+        );
+
+        uint64_t value =
+            run.count;
+
+        while (value >= 128) {
+
+            uint8_t byte =
+                static_cast<uint8_t>(
+                    (value & 0x7F)
+                    | 0x80
                 );
 
-                if (
-                    generation
-                    ==
-                    myGeneration
-                ) {
+            file.put(
+                static_cast<char>(
+                    byte
+                )
+            );
 
-                    ++finishedWorkers;
-
-                    if (
-                        finishedWorkers
-                        ==
-                        threadCount
-                    ) {
-
-                        doneCV.notify_one();
-                    }
-                }
-            }
+            value >>= 7;
         }
+
+        file.put(
+            static_cast<char>(
+                value
+            )
+        );
     }
-};
+
+    if (!file) {
+
+        throw std::runtime_error(
+            "Failed writing compressed file:\n"
+            + path.string()
+        );
+    }
+}
 
 // ============================================================
 // SERIAL DECOMPRESSION
@@ -599,18 +698,20 @@ private:
 
 std::vector<uint8_t> rleDecompressSerial(
     const RLECompressed& compressed
-) {
+)
+{
     uint64_t totalSize = 0;
 
-    for (const auto& run : compressed.runs) {
+    for (
+        const auto& run :
+        compressed.runs
+    ) {
 
         totalSize +=
             run.count;
     }
 
-    std::vector<uint8_t> output;
-
-    output.resize(
+    std::vector<uint8_t> output(
         static_cast<size_t>(
             totalSize
         )
@@ -618,7 +719,10 @@ std::vector<uint8_t> rleDecompressSerial(
 
     size_t position = 0;
 
-    for (const auto& run : compressed.runs) {
+    for (
+        const auto& run :
+        compressed.runs
+    ) {
 
         std::fill(
             output.begin() + position,
@@ -642,378 +746,201 @@ std::vector<uint8_t> rleDecompressSerial(
 }
 
 // ============================================================
-// PERSISTENT DECOMPRESSION POOL
+// PARALLEL DECOMPRESSION
 // ============================================================
 
-class DecompressionPool {
-
-private:
-
-    const RLECompressed& compressed;
-
-    int threadCount;
-
-    std::vector<uint8_t> output;
-
-    std::vector<size_t> runStarts;
-
-    std::vector<std::thread> workers;
-
-    std::mutex mutex;
-
-    std::condition_variable startCV;
-    std::condition_variable doneCV;
-
-    bool stop = false;
-
-    uint64_t generation = 0;
-
-    int finishedWorkers = 0;
-
-public:
-
-    DecompressionPool(
-        const RLECompressed& input,
-        int threads
-    )
-        : compressed(input),
-          threadCount(
-              std::max(1, threads)
-          )
-    {
-        // ----------------------------------------------------
-        // Calculate total output size
-        // ----------------------------------------------------
-
-        uint64_t totalSize = 0;
-
-        for (
-            const auto& run :
-            compressed.runs
-        ) {
-
-            totalSize +=
-                run.count;
-        }
-
-        output.resize(
-            static_cast<size_t>(
-                totalSize
-            )
-        );
-
-        if (compressed.runs.empty()) {
-
-            threadCount = 1;
-        }
-        else {
-
-            threadCount =
-                std::min<int>(
-                    threadCount,
-                    static_cast<int>(
-                        compressed.runs.size()
-                    )
-                );
-        }
-
-        runStarts.resize(
-            threadCount + 1
-        );
-
-        for (
-            int i = 0;
-            i <= threadCount;
-            ++i
-        ) {
-
-            runStarts[i] =
-                (
-                    compressed.runs.size()
-                    *
-                    static_cast<size_t>(i)
-                )
-                /
-                static_cast<size_t>(
-                    threadCount
-                );
-        }
-
-        workers.reserve(
-            threadCount
-        );
-
-        for (
-            int i = 0;
-            i < threadCount;
-            ++i
-        ) {
-
-            workers.emplace_back(
-                &DecompressionPool::workerLoop,
-                this,
-                i
-            );
-        }
-    }
-
-    ~DecompressionPool()
-    {
-        {
-            std::lock_guard<std::mutex> lock(
-                mutex
-            );
-
-            stop = true;
-            ++generation;
-        }
-
-        startCV.notify_all();
-
-        for (auto& worker : workers) {
-
-            if (worker.joinable()) {
-                worker.join();
-            }
-        }
-    }
-
-    const std::vector<uint8_t>& decompress()
-    {
-        {
-            std::lock_guard<std::mutex> lock(
-                mutex
-            );
-
-            finishedWorkers = 0;
-
-            ++generation;
-        }
-
-        startCV.notify_all();
-
-        {
-            std::unique_lock<std::mutex> lock(
-                mutex
-            );
-
-            doneCV.wait(
-                lock,
-                [&]() {
-                    return
-                        finishedWorkers
-                        ==
-                        threadCount;
-                }
-            );
-        }
-
-        return output;
-    }
-
-private:
-
-    void workerLoop(
-        int workerId
-    )
-    {
-        uint64_t lastGeneration = 0;
-
-        while (true) {
-
-            uint64_t myGeneration;
-
-            {
-                std::unique_lock<std::mutex> lock(
-                    mutex
-                );
-
-                startCV.wait(
-                    lock,
-                    [&]() {
-                        return
-                            stop
-                            ||
-                            generation
-                                !=
-                            lastGeneration;
-                    }
-                );
-
-                if (stop) {
-                    return;
-                }
-
-                myGeneration =
-                    generation;
-
-                lastGeneration =
-                    generation;
-            }
-
-            size_t runStart =
-                runStarts[workerId];
-
-            size_t runEnd =
-                runStarts[
-                    workerId + 1
-                ];
-
-            // ------------------------------------------------
-            // Find output position of first run
-            // ------------------------------------------------
-
-            size_t outputPosition = 0;
-
-            for (
-                size_t i = 0;
-                i < runStart;
-                ++i
-            ) {
-
-                outputPosition +=
-                    static_cast<size_t>(
-                        compressed.runs[i].count
-                    );
-            }
-
-            // ------------------------------------------------
-            // Decompress assigned runs
-            // ------------------------------------------------
-
-            for (
-                size_t i = runStart;
-                i < runEnd;
-                ++i
-            ) {
-
-                const RLEPair& run =
-                    compressed.runs[i];
-
-                std::fill(
-                    output.begin()
-                        +
-                        outputPosition,
-
-                    output.begin()
-                        +
-                        outputPosition
-                        +
-                        static_cast<size_t>(
-                            run.count
-                        ),
-
-                    run.value
-                );
-
-                outputPosition +=
-                    static_cast<size_t>(
-                        run.count
-                    );
-            }
-
-            // ------------------------------------------------
-            // Notify completion
-            // ------------------------------------------------
-
-            {
-                std::lock_guard<std::mutex> lock(
-                    mutex
-                );
-
-                if (
-                    generation
-                    ==
-                    myGeneration
-                ) {
-
-                    ++finishedWorkers;
-
-                    if (
-                        finishedWorkers
-                        ==
-                        threadCount
-                    ) {
-
-                        doneCV.notify_one();
-                    }
-                }
-            }
-        }
-    }
-};
-
-// ============================================================
-// VARIABLE LENGTH INTEGER SIZE
-//
-// Count encoding:
-// 7 bits of data per byte.
-// High bit indicates continuation.
-//
-// Examples:
-//
-// 1       -> 1 byte
-// 127     -> 1 byte
-// 128     -> 2 bytes
-// 16383   -> 2 bytes
-// 16384   -> 3 bytes
-// ============================================================
-
-size_t encodedCountSize(
-    uint64_t value
-) {
-    size_t size = 1;
-
-    while (value >= 128) {
-
-        value >>= 7;
-
-        ++size;
-    }
-
-    return size;
-}
-
-// ============================================================
-// COMPRESSED SIZE
-//
-// Each run:
-//
-//     1 byte  -> value
-//     N bytes -> variable-length count
-//
-// ============================================================
-
-uint64_t calculateCompressedSize(
-    const RLECompressed& compressed
-) {
-    uint64_t size = 0;
+std::vector<uint8_t> rleDecompressParallel(
+    const RLECompressed& compressed,
+    int threads
+)
+{
+    uint64_t totalSize = 0;
 
     for (
         const auto& run :
         compressed.runs
     ) {
 
-        size += 1;
+        totalSize +=
+            run.count;
+    }
 
-        size +=
-            encodedCountSize(
-                run.count
+    std::vector<uint8_t> output(
+        static_cast<size_t>(
+            totalSize
+        )
+    );
+
+    if (
+        compressed.runs.empty()
+    ) {
+
+        return output;
+    }
+
+    threads =
+        std::max(
+            1,
+            threads
+        );
+
+    threads =
+        std::min<int>(
+            threads,
+            static_cast<int>(
+                compressed.runs.size()
+            )
+        );
+
+    if (threads == 1) {
+
+        return rleDecompressSerial(
+            compressed
+        );
+    }
+
+    std::vector<size_t> runStarts(
+        static_cast<size_t>(
+            threads + 1
+        )
+    );
+
+    for (
+        int t = 0;
+        t <= threads;
+        ++t
+    ) {
+
+        runStarts[t] =
+            (
+                compressed.runs.size()
+                *
+                static_cast<size_t>(t)
+            )
+            /
+            static_cast<size_t>(
+                threads
             );
     }
 
-    return size;
+    std::vector<size_t> outputOffsets(
+        static_cast<size_t>(
+            threads + 1
+        )
+    );
+
+    outputOffsets[0] = 0;
+
+    for (
+        int t = 0;
+        t < threads;
+        ++t
+    ) {
+
+        size_t bytes = 0;
+
+        for (
+            size_t i = runStarts[t];
+            i < runStarts[t + 1];
+            ++i
+        ) {
+
+            bytes +=
+                static_cast<size_t>(
+                    compressed.runs[i].count
+                );
+        }
+
+        outputOffsets[t + 1] =
+            outputOffsets[t]
+            +
+            bytes;
+    }
+
+    std::vector<std::thread> workers;
+
+    workers.reserve(
+        threads
+    );
+
+    for (
+        int t = 0;
+        t < threads;
+        ++t
+    ) {
+
+        size_t begin =
+            runStarts[t];
+
+        size_t end =
+            runStarts[t + 1];
+
+        size_t outputStart =
+            outputOffsets[t];
+
+        workers.emplace_back(
+            [
+                &compressed,
+                &output,
+                begin,
+                end,
+                outputStart
+            ] {
+
+                size_t position =
+                    outputStart;
+
+                for (
+                    size_t i = begin;
+                    i < end;
+                    ++i
+                ) {
+
+                    const auto& run =
+                        compressed.runs[i];
+
+                    std::fill(
+                        output.begin()
+                            + position,
+                        output.begin()
+                            +
+                            position
+                            +
+                            static_cast<size_t>(
+                                run.count
+                            ),
+                        run.value
+                    );
+
+                    position +=
+                        static_cast<size_t>(
+                            run.count
+                        );
+                }
+            }
+        );
+    }
+
+    for (auto& worker : workers) {
+
+        worker.join();
+    }
+
+    return output;
 }
 
 // ============================================================
-// PEAK WORKING SET
+// CURRENT MEMORY
 // ============================================================
 
-double getPeakWorkingSetMB()
+uint64_t getCurrentWorkingSet()
 {
 #ifdef _WIN32
 
     PROCESS_MEMORY_COUNTERS counters{};
+
+    counters.cb =
+        sizeof(counters);
 
     if (
         GetProcessMemoryInfo(
@@ -1024,231 +951,632 @@ double getPeakWorkingSetMB()
     ) {
 
         return
-            static_cast<double>(
-                counters.PeakWorkingSetSize
-            )
-            /
-            (1024.0 * 1024.0);
+            static_cast<uint64_t>(
+                counters.WorkingSetSize
+            );
     }
 
 #endif
 
-    return 0.0;
+    return 0;
 }
 
 // ============================================================
-// PROGRESS BAR
+// PEAK MEMORY
+// ============================================================
+
+uint64_t getPeakWorkingSet()
+{
+#ifdef _WIN32
+
+    PROCESS_MEMORY_COUNTERS counters{};
+
+    counters.cb =
+        sizeof(counters);
+
+    if (
+        GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            &counters,
+            sizeof(counters)
+        )
+    ) {
+
+        return
+            static_cast<uint64_t>(
+                counters.PeakWorkingSetSize
+            );
+    }
+
+#endif
+
+    return 0;
+}
+
+// ============================================================
+// PROGRESS
 // ============================================================
 
 void showProgress(
     int current,
-    int total
-) {
-    constexpr int WIDTH = 40;
-
-    double progress =
-        static_cast<double>(
-            current
-        )
-        /
-        static_cast<double>(
-            total
+    int total,
+    const std::string& label
+)
+{
+    double percent =
+        total == 0
+        ? 100.0
+        :
+        (
+            static_cast<double>(
+                current
+            )
+            /
+            static_cast<double>(
+                total
+            )
+            *
+            100.0
         );
 
     int filled =
+        total == 0
+        ? PROGRESS_WIDTH
+        :
         static_cast<int>(
-            progress * WIDTH
+            (
+                static_cast<double>(
+                    current
+                )
+                /
+                static_cast<double>(
+                    total
+                )
+            )
+            *
+            PROGRESS_WIDTH
         );
 
-    std::cout << "[";
+    filled =
+        std::min(
+            filled,
+            PROGRESS_WIDTH
+        );
+
+    std::cout
+        << "\r  "
+        << std::left
+        << std::setw(16)
+        << label
+        << " [";
 
     for (
         int i = 0;
-        i < WIDTH;
+        i < PROGRESS_WIDTH;
         ++i
     ) {
 
-        if (i < filled) {
-            std::cout << '#';
-        }
-        else {
-            std::cout << '-';
-        }
+        std::cout
+            << (
+                i < filled
+                    ? '#'
+                    : '-'
+            );
     }
 
     std::cout
         << "] "
+        << std::right
         << std::fixed
         << std::setprecision(2)
-        << progress * 100.0
-        << "%"
-        << std::flush;
+        << std::setw(6)
+        << percent
+        << "%";
+
+    std::cout.flush();
+
+    if (
+        current >= total
+    ) {
+
+        std::cout << '\n';
+    }
 }
 
 // ============================================================
-// CSV
+// CSV HEADER
+// ============================================================
+
+void writeCSVHeader(
+    std::ofstream& file
+)
+{
+    file
+        << "dataset,"
+        << "algorithm,"
+        << "threads,"
+        << "original_bytes,"
+        << "compressed_bytes,"
+        << "entropy,"
+        << "compression_ratio,"
+        << "space_saved_percent,"
+        << "compression_time,"
+        << "decompression_time,"
+        << "compression_throughput_MB_s,"
+        << "decompression_throughput_MB_s,"
+        << "memory_MB,"
+        << "lossless\n";
+}
+
+// ============================================================
+// WRITE RUN CSV
+// ============================================================
+
+void writeCSV(
+    const std::vector<Result>& results
+)
+{
+    fs::path path =
+        RUN_DIR / "results.csv";
+
+    std::ofstream file(
+        path
+    );
+
+    if (!file) {
+
+        throw std::runtime_error(
+            "Cannot create results CSV:\n"
+            + path.string()
+        );
+    }
+
+    writeCSVHeader(
+        file
+    );
+
+    for (
+        const auto& r :
+        results
+    ) {
+
+        file
+            << r.dataset
+            << ","
+            << r.algorithm
+            << ","
+            << r.threads
+            << ","
+            << r.originalBytes
+            << ","
+            << r.compressedBytes
+            << ","
+            << std::setprecision(12)
+            << r.entropy
+            << ","
+            << r.compressionRatio
+            << ","
+            << r.spaceSaved
+            << ","
+            << r.compressionTime
+            << ","
+            << r.decompressionTime
+            << ","
+            << r.compressionThroughput
+            << ","
+            << r.decompressionThroughput
+            << ","
+            << r.memoryMB
+            << ","
+            << (
+                r.lossless
+                    ? "true"
+                    : "false"
+            )
+            << "\n";
+    }
+}
+
+// ============================================================
+// APPEND MASTER CSV
 // ============================================================
 
 void appendMasterCSV(
-    const Result& r
-) {
-    fs::path csvPath =
-        "../results/rle_all_runs.csv";
-
-    fs::create_directories(
-        csvPath.parent_path()
-    );
+    const std::vector<Result>& results
+)
+{
+    fs::path path =
+        RESULT_ROOT
+        /
+        "rle_all_runs.csv";
 
     bool exists =
-        fs::exists(csvPath)
+        fs::exists(path)
         &&
-        fs::file_size(csvPath) > 0;
+        fs::file_size(path) > 0;
 
     std::ofstream file(
-        csvPath,
+        path,
         std::ios::app
     );
 
     if (!file) {
 
         throw std::runtime_error(
-            "Cannot open CSV: "
-            +
-            csvPath.string()
+            "Cannot open master CSV:\n"
+            + path.string()
         );
     }
 
     if (!exists) {
 
-        file
-            << "dataset,"
-            << "algorithm,"
-            << "threads,"
-            << "original_bytes,"
-            << "compressed_bytes,"
-            << "entropy,"
-            << "compression_ratio,"
-            << "space_saved_percent,"
-            << "compression_time,"
-            << "decompression_time,"
-            << "compression_throughput_MB_s,"
-            << "decompression_throughput_MB_s,"
-            << "memory_MB,"
-            << "lossless\n";
+        writeCSVHeader(
+            file
+        );
     }
 
-    file
-        << r.dataset
-        << ","
-        << r.algorithm
-        << ","
-        << r.threads
-        << ","
-        << r.originalBytes
-        << ","
-        << r.compressedBytes
-        << ","
-        << std::setprecision(12)
-        << r.entropy
-        << ","
-        << r.compressionRatio
-        << ","
-        << r.spaceSaved
-        << ","
-        << r.compressionTime
-        << ","
-        << r.decompressionTime
-        << ","
-        << r.compressionThroughput
-        << ","
-        << r.decompressionThroughput
-        << ","
-        << r.memoryMB
-        << ","
-        << (
-            r.lossless
-                ? "true"
-                : "false"
-        )
-        << "\n";
+    for (
+        const auto& r :
+        results
+    ) {
+
+        file
+            << r.dataset
+            << ","
+            << r.algorithm
+            << ","
+            << r.threads
+            << ","
+            << r.originalBytes
+            << ","
+            << r.compressedBytes
+            << ","
+            << std::setprecision(12)
+            << r.entropy
+            << ","
+            << r.compressionRatio
+            << ","
+            << r.spaceSaved
+            << ","
+            << r.compressionTime
+            << ","
+            << r.decompressionTime
+            << ","
+            << r.compressionThroughput
+            << ","
+            << r.decompressionThroughput
+            << ","
+            << r.memoryMB
+            << ","
+            << (
+                r.lossless
+                    ? "true"
+                    : "false"
+            )
+            << "\n";
+    }
 }
 
 // ============================================================
-// BENCHMARK ONE DATASET
+// WRITE JSON
 // ============================================================
 
-Result benchmark(
-    const std::string& path,
+void writeJSON(
+    const std::vector<Result>& results
+)
+{
+    fs::path path =
+        RUN_DIR / "results.json";
+
+    std::ofstream file(
+        path
+    );
+
+    if (!file) {
+
+        throw std::runtime_error(
+            "Cannot create results JSON:\n"
+            + path.string()
+        );
+    }
+
+    file
+        << "{\n"
+        << "  \"algorithm\": \"RLE\",\n"
+        << "  \"threads\": "
+        << (
+            results.empty()
+                ? 0
+                : results[0].threads
+        )
+        << ",\n"
+        << "  \"timing_iterations\": "
+        << TIMING_ITERATIONS
+        << ",\n"
+        << "  \"datasets\": [\n";
+
+    for (
+        size_t i = 0;
+        i < results.size();
+        ++i
+    ) {
+
+        const auto& r =
+            results[i];
+
+        file
+            << "    {\n"
+            << "      \"dataset\": \""
+            << r.dataset
+            << "\",\n"
+
+            << "      \"threads\": "
+            << r.threads
+            << ",\n"
+
+            << "      \"original_bytes\": "
+            << r.originalBytes
+            << ",\n"
+
+            << "      \"compressed_bytes\": "
+            << r.compressedBytes
+            << ",\n"
+
+            << "      \"entropy\": "
+            << std::setprecision(12)
+            << r.entropy
+            << ",\n"
+
+            << "      \"compression_ratio\": "
+            << r.compressionRatio
+            << ",\n"
+
+            << "      \"space_saved_percent\": "
+            << r.spaceSaved
+            << ",\n"
+
+            << "      \"compression_time\": "
+            << r.compressionTime
+            << ",\n"
+
+            << "      \"decompression_time\": "
+            << r.decompressionTime
+            << ",\n"
+
+            << "      \"compression_throughput_MB_s\": "
+            << r.compressionThroughput
+            << ",\n"
+
+            << "      \"decompression_throughput_MB_s\": "
+            << r.decompressionThroughput
+            << ",\n"
+
+            << "      \"memory_MB\": "
+            << r.memoryMB
+            << ",\n"
+
+            << "      \"lossless\": "
+            << (
+                r.lossless
+                    ? "true"
+                    : "false"
+            )
+            << "\n"
+
+            << "    }";
+
+        if (
+            i + 1 < results.size()
+        ) {
+
+            file << ",";
+        }
+
+        file << "\n";
+    }
+
+    file
+        << "  ]\n"
+        << "}\n";
+}
+
+// ============================================================
+// WRITE INDIVIDUAL LOG
+// ============================================================
+
+void writeLog(
+    const Result& r
+)
+{
+    fs::path logPath =
+        LOG_DIR
+        /
+        (
+            r.dataset
+            +
+            ".log"
+        );
+
+    std::ofstream file(
+        logPath
+    );
+
+    if (!file) {
+
+        throw std::runtime_error(
+            "Cannot create log:\n"
+            + logPath.string()
+        );
+    }
+
+    file
+        << "============================================================\n"
+        << "RLE COMPRESSION EXPERIMENT\n"
+        << "============================================================\n\n"
+
+        << "Dataset: "
+        << r.dataset
+        << "\n"
+
+        << "Algorithm: "
+        << r.algorithm
+        << "\n"
+
+        << "Threads: "
+        << r.threads
+        << "\n"
+
+        << "Timing iterations: "
+        << TIMING_ITERATIONS
+        << "\n\n"
+
+        << "Original size: "
+        << r.originalBytes
+        << " bytes\n"
+
+        << "Compressed size: "
+        << r.compressedBytes
+        << " bytes\n"
+
+        << "Entropy: "
+        << std::setprecision(12)
+        << r.entropy
+        << " bits/symbol\n"
+
+        << "Compression ratio: "
+        << r.compressionRatio
+        << "\n"
+
+        << "Space saved: "
+        << r.spaceSaved
+        << "%\n\n"
+
+        << "Compression time per iteration: "
+        << r.compressionTime
+        << " seconds\n"
+
+        << "Decompression time per iteration: "
+        << r.decompressionTime
+        << " seconds\n"
+
+        << "Compression throughput: "
+        << r.compressionThroughput
+        << " MB/s\n"
+
+        << "Decompression throughput: "
+        << r.decompressionThroughput
+        << " MB/s\n"
+
+        << "Peak working set: "
+        << r.memoryMB
+        << " MB\n"
+
+        << "Lossless verification: "
+        << (
+            r.lossless
+                ? "PASS"
+                : "FAIL"
+        )
+        << "\n\n"
+
+        << "============================================================\n";
+}
+
+// ============================================================
+// BENCHMARK
+// ============================================================
+
+Result runExperiment(
+    const std::string& filename,
     int threads
-) {
-    // --------------------------------------------------------
-    // LOAD DATA
-    // --------------------------------------------------------
-
-    std::vector<uint8_t> data =
-        readFile(path);
-
+)
+{
     Result result;
 
     result.dataset =
-        fs::path(path).filename().string();
-
-    result.algorithm =
-        "RLE";
+        filename;
 
     result.threads =
         threads;
+
+    fs::path inputPath =
+        DATASET_DIR
+        /
+        filename;
+
+    fs::path compressedPath =
+        COMPRESSED_DIR
+        /
+        (
+            filename
+            +
+            ".rle"
+        );
+
+    // --------------------------------------------------------
+    // READ
+    // --------------------------------------------------------
+
+    std::vector<uint8_t> data =
+        readFile(
+            inputPath
+        );
 
     result.originalBytes =
         data.size();
 
     result.entropy =
-        calculateEntropy(data);
+        calculateEntropy(
+            data
+        );
+
+    std::cout
+        << "  Original size: "
+        << result.originalBytes
+        << " bytes\n";
 
     // --------------------------------------------------------
-    // CREATE PERSISTENT COMPRESSION POOL
-    // --------------------------------------------------------
-
-    CompressionPool compressionPool(
-        data,
-        threads
-    );
-
-    // --------------------------------------------------------
-    // WARM-UP
+    // WARMUP
     // --------------------------------------------------------
 
     std::cout
         << "  Warming up        ";
 
-    showProgress(0, 1);
-
-    RLECompressed warmCompressed =
-        compressionPool.compress();
-
-    DecompressionPool warmDecompressionPool(
-        warmCompressed,
-        threads
+    showProgress(
+        0,
+        1,
+        "Warming up"
     );
 
-    const auto& warmDecoded =
-        warmDecompressionPool.decompress();
+    RLECompressed warmCompressed =
+        rleCompressParallel(
+            data,
+            threads
+        );
+
+    std::vector<uint8_t> warmDecoded =
+        rleDecompressParallel(
+            warmCompressed,
+            threads
+        );
 
     (void)warmDecoded;
 
-    std::cout
-        << "\r  Warming up        ";
-
-    showProgress(1, 1);
-
-    std::cout << "\n";
+    showProgress(
+        1,
+        1,
+        "Warming up"
+    );
 
     // --------------------------------------------------------
     // REFERENCE COMPRESSION
     // --------------------------------------------------------
 
     RLECompressed reference =
-        compressionPool.compress();
+        rleCompressParallel(
+            data,
+            threads
+        );
 
     result.compressedBytes =
         calculateCompressedSize(
@@ -1260,9 +1588,9 @@ Result benchmark(
     // --------------------------------------------------------
 
     if (
-        result.compressedBytes > 0
-        &&
         result.originalBytes > 0
+        &&
+        result.compressedBytes > 0
     ) {
 
         result.compressionRatio =
@@ -1292,20 +1620,21 @@ Result benchmark(
 
     // --------------------------------------------------------
     // COMPRESSION TIMING
-    //
-    // 100 consecutive compressions.
-    // Worker threads are persistent.
     // --------------------------------------------------------
 
     std::cout
         << "  Compressing      ";
 
-    showProgress(0, TIMING_ITERATIONS);
+    showProgress(
+        0,
+        TIMING_ITERATIONS,
+        "Compressing"
+    );
 
     auto compressionStart =
         std::chrono::steady_clock::now();
 
-    RLECompressed timedCompressed;
+    RLECompressed finalCompressed;
 
     for (
         int iteration = 0;
@@ -1313,23 +1642,23 @@ Result benchmark(
         ++iteration
     ) {
 
-        timedCompressed =
-            compressionPool.compress();
+        finalCompressed =
+            rleCompressParallel(
+                data,
+                threads
+            );
 
         if (
             iteration % 2 == 0
             ||
-            iteration
-                ==
-            TIMING_ITERATIONS - 1
+            iteration ==
+                TIMING_ITERATIONS - 1
         ) {
-
-            std::cout
-                << "\r  Compressing      ";
 
             showProgress(
                 iteration + 1,
-                TIMING_ITERATIONS
+                TIMING_ITERATIONS,
+                "Compressing"
             );
         }
     }
@@ -1351,36 +1680,32 @@ Result benchmark(
             TIMING_ITERATIONS
         );
 
-    std::cout << "\n";
-
     // --------------------------------------------------------
-    // CREATE DECOMPRESSION POOL
-    //
-    // This pool persists across all 100 iterations.
+    // SAVE COMPRESSED FILE
     // --------------------------------------------------------
 
-    DecompressionPool decompressionPool(
-        timedCompressed,
-        threads
+    writeCompressedFile(
+        compressedPath,
+        finalCompressed
     );
 
     // --------------------------------------------------------
-    // DECOMPRESSION TIMING
-    //
-    // 100 consecutive decompressions.
-    // Worker threads are persistent.
+    // DECOMPRESSION
     // --------------------------------------------------------
 
     std::cout
         << "  Decompressing    ";
 
-    showProgress(0, TIMING_ITERATIONS);
+    showProgress(
+        0,
+        TIMING_ITERATIONS,
+        "Decompressing"
+    );
 
     auto decompressionStart =
         std::chrono::steady_clock::now();
 
-    const std::vector<uint8_t>* decoded =
-        nullptr;
+    std::vector<uint8_t> finalDecoded;
 
     for (
         int iteration = 0;
@@ -1388,23 +1713,23 @@ Result benchmark(
         ++iteration
     ) {
 
-        decoded =
-            &decompressionPool.decompress();
+        finalDecoded =
+            rleDecompressParallel(
+                finalCompressed,
+                threads
+            );
 
         if (
             iteration % 2 == 0
             ||
-            iteration
-                ==
-            TIMING_ITERATIONS - 1
+            iteration ==
+                TIMING_ITERATIONS - 1
         ) {
-
-            std::cout
-                << "\r  Decompressing    ";
 
             showProgress(
                 iteration + 1,
-                TIMING_ITERATIONS
+                TIMING_ITERATIONS,
+                "Decompressing"
             );
         }
     }
@@ -1426,21 +1751,16 @@ Result benchmark(
             TIMING_ITERATIONS
         );
 
-    std::cout << "\n";
-
     // --------------------------------------------------------
-    // LOSSLESS VERIFICATION
+    // LOSSLESS
     // --------------------------------------------------------
 
-    if (decoded != nullptr) {
-
-        result.lossless =
-            (
-                *decoded
-                ==
-                data
-            );
-    }
+    result.lossless =
+        (
+            finalDecoded
+            ==
+            data
+        );
 
     // --------------------------------------------------------
     // THROUGHPUT
@@ -1454,7 +1774,7 @@ Result benchmark(
         (1024.0 * 1024.0);
 
     if (
-        result.compressionTime > 0
+        result.compressionTime > 0.0
     ) {
 
         result.compressionThroughput =
@@ -1464,7 +1784,7 @@ Result benchmark(
     }
 
     if (
-        result.decompressionTime > 0
+        result.decompressionTime > 0.0
     ) {
 
         result.decompressionThroughput =
@@ -1478,9 +1798,82 @@ Result benchmark(
     // --------------------------------------------------------
 
     result.memoryMB =
-        getPeakWorkingSetMB();
+        static_cast<double>(
+            getPeakWorkingSet()
+        )
+        /
+        (1024.0 * 1024.0);
 
     return result;
+}
+
+// ============================================================
+// PRINT RESULT
+// ============================================================
+
+void printResult(
+    const Result& r
+)
+{
+    std::cout
+        << "\n"
+        << "  Threads: "
+        << r.threads
+        << "\n"
+
+        << "  Original size: "
+        << r.originalBytes
+        << " bytes\n"
+
+        << "  Compressed size: "
+        << r.compressedBytes
+        << " bytes\n"
+
+        << "  Compression ratio: "
+        << std::fixed
+        << std::setprecision(6)
+        << r.compressionRatio
+        << "\n"
+
+        << "  Space saved: "
+        << std::setprecision(2)
+        << r.spaceSaved
+        << "%\n"
+
+        << "  Entropy: "
+        << std::setprecision(6)
+        << r.entropy
+        << " bits/symbol\n"
+
+        << "  Compression time (per iteration): "
+        << std::setprecision(6)
+        << r.compressionTime
+        << " s\n"
+
+        << "  Decompression time (per iteration): "
+        << r.decompressionTime
+        << " s\n"
+
+        << "  Compression throughput: "
+        << std::setprecision(2)
+        << r.compressionThroughput
+        << " MB/s\n"
+
+        << "  Decompression throughput: "
+        << r.decompressionThroughput
+        << " MB/s\n"
+
+        << "  Peak working set: "
+        << r.memoryMB
+        << " MB\n"
+
+        << "  Lossless verification: "
+        << (
+            r.lossless
+                ? "PASS"
+                : "FAIL"
+        )
+        << "\n";
 }
 
 // ============================================================
@@ -1491,151 +1884,229 @@ int main()
 {
     try {
 
+        // ----------------------------------------------------
+        // PATHS
+        // ----------------------------------------------------
+
+        initializePaths();
+
+        // ----------------------------------------------------
+        // HARDWARE
+        // ----------------------------------------------------
+
+        unsigned int hardwareThreads =
+            std::thread::hardware_concurrency();
+
+        if (
+            hardwareThreads == 0
+        ) {
+
+            hardwareThreads = 1;
+        }
+
+        int maxThreads =
+            std::min(
+                MAX_THREADS,
+                static_cast<int>(
+                    hardwareThreads
+                )
+            );
+
+        // ----------------------------------------------------
+        // HEADER
+        // ----------------------------------------------------
+
         std::cout
             << "\n"
             << "============================================================\n"
-            << "RLE COMPRESSION BENCHMARK\n"
-            << "============================================================\n\n";
+            << "RLE COMPRESSION RESEARCH BENCHMARK\n"
+            << "============================================================\n\n"
 
-        std::cout
-            << "Timing iterations per measurement: "
-            << TIMING_ITERATIONS
+            << "Dataset directory:\n  "
+            << DATASET_DIR
+            << "\n\n"
+
+            << "Detected hardware threads: "
+            << hardwareThreads
+            << "\n"
+
+            << "Maximum benchmark threads: "
+            << maxThreads
             << "\n";
 
-        std::cout
-            << "Datasets: "
-            << DATASETS.size()
-            << "\n";
+        // ----------------------------------------------------
+        // THREAD INPUT
+        // ----------------------------------------------------
+
+        int threads = 1;
 
         std::cout
-            << "Parallel threads: 1-"
-            << MAX_THREADS
-            << "\n\n";
-
-        int threads;
-
-        std::cout
-            << "Enter number of threads [1-"
-            << MAX_THREADS
+            << "\n"
+            << "How many threads should be used? [1-"
+            << maxThreads
             << "]: ";
 
         std::cin
             >> threads;
 
         if (
-            threads < 1
+            !std::cin
             ||
-            threads > MAX_THREADS
+            threads < 1
         ) {
 
-            std::cerr
-                << "Invalid thread count.\n";
-
-            return 1;
+            threads = 1;
         }
 
+        threads =
+            std::min(
+                threads,
+                maxThreads
+            );
+
         // ----------------------------------------------------
-        // CREATE RESULTS DIRECTORY
+        // UNIQUE RUN DIRECTORY
         // ----------------------------------------------------
 
+        std::string timestamp =
+            getTimestamp();
+
+        RUN_DIR =
+            RESULT_ROOT
+            /
+            "rle"
+            /
+            (
+                std::to_string(
+                    threads
+                )
+                +
+                "_threads_"
+                +
+                timestamp
+            );
+
+        COMPRESSED_DIR =
+            RUN_DIR
+            /
+            "compressed";
+
+        LOG_DIR =
+            RUN_DIR
+            /
+            "logs";
+
         fs::create_directories(
-            "../results/rle"
+            COMPRESSED_DIR
+        );
+
+        fs::create_directories(
+            LOG_DIR
         );
 
         // ----------------------------------------------------
-        // PROCESS DATASETS
+        // CONFIGURATION
         // ----------------------------------------------------
 
-        size_t completed = 0;
+        std::cout
+            << "\n"
+            << "Configuration\n"
+            << "------------------------------------------------------------\n"
+
+            << "Algorithm:         RLE\n"
+
+            << "Threads:           "
+            << threads
+            << "\n"
+
+            << "Parallel mode:     "
+            << (
+                threads == 1
+                    ? "Single-threaded"
+                    : "Parallel chunks"
+            )
+            << "\n"
+
+            << "Timing iterations: "
+            << TIMING_ITERATIONS
+            << "\n"
+
+            << "Timing method:     Total time / iterations\n"
+
+            << "Run directory:\n  "
+            << RUN_DIR
+            << "\n"
+
+            << "------------------------------------------------------------\n";
+
+        // ----------------------------------------------------
+        // RESULTS
+        // ----------------------------------------------------
+
+        std::vector<Result> results;
+
+        results.reserve(
+            DATASETS.size()
+        );
+
+        // ----------------------------------------------------
+        // PROCESS
+        // ----------------------------------------------------
 
         for (
-            const auto& dataset :
-            DATASETS
+            size_t i = 0;
+            i < DATASETS.size();
+            ++i
         ) {
 
-            ++completed;
+            const std::string& filename =
+                DATASETS[i];
 
             std::cout
                 << "\n["
-                << completed
+                << i + 1
                 << "/"
                 << DATASETS.size()
                 << "] Processing \""
-                << fs::path(dataset).filename().string()
+                << filename
                 << "\"\n";
 
             std::cout
                 << "------------------------------------------------------------\n";
 
+            fs::path datasetPath =
+                DATASET_DIR
+                /
+                filename;
+
+            if (
+                !fs::exists(datasetPath)
+            ) {
+
+                std::cout
+                    << "  WARNING: Dataset not found. Skipping.\n";
+
+                continue;
+            }
+
             try {
 
                 Result result =
-                    benchmark(
-                        dataset,
+                    runExperiment(
+                        filename,
                         threads
                     );
 
-                std::cout
-                    << "\n"
-                    << "  Threads: "
-                    << result.threads
-                    << "\n"
+                printResult(
+                    result
+                );
 
-                    << "  Original size: "
-                    << result.originalBytes
-                    << " bytes\n"
+                // Per-dataset log.
+                writeLog(
+                    result
+                );
 
-                    << "  Compressed size: "
-                    << result.compressedBytes
-                    << " bytes\n"
-
-                    << "  Compression ratio: "
-                    << std::fixed
-                    << std::setprecision(6)
-                    << result.compressionRatio
-                    << "\n"
-
-                    << "  Space saved: "
-                    << std::setprecision(2)
-                    << result.spaceSaved
-                    << "%\n"
-
-                    << "  Entropy: "
-                    << std::setprecision(6)
-                    << result.entropy
-                    << " bits/symbol\n"
-
-                    << "  Compression time (per iteration): "
-                    << std::setprecision(6)
-                    << result.compressionTime
-                    << " s\n"
-
-                    << "  Decompression time (per iteration): "
-                    << result.decompressionTime
-                    << " s\n"
-
-                    << "  Compression throughput: "
-                    << std::setprecision(2)
-                    << result.compressionThroughput
-                    << " MB/s\n"
-
-                    << "  Decompression throughput: "
-                    << result.decompressionThroughput
-                    << " MB/s\n"
-
-                    << "  Peak working set: "
-                    << result.memoryMB
-                    << " MB\n"
-
-                    << "  Lossless verification: "
-                    << (
-                        result.lossless
-                            ? "PASS"
-                            : "FAIL"
-                    )
-                    << "\n";
-
-                appendMasterCSV(
+                results.push_back(
                     result
                 );
             }
@@ -1644,11 +2115,37 @@ int main()
             ) {
 
                 std::cerr
-                    << "\nERROR: "
+                    << "\nERROR processing "
+                    << filename
+                    << ": "
                     << e.what()
                     << "\n";
             }
         }
+
+        // ----------------------------------------------------
+        // WRITE RUN RESULTS
+        // ----------------------------------------------------
+
+        writeCSV(
+            results
+        );
+
+        writeJSON(
+            results
+        );
+
+        // ----------------------------------------------------
+        // APPEND MASTER
+        // ----------------------------------------------------
+
+        appendMasterCSV(
+            results
+        );
+
+        // ----------------------------------------------------
+        // FINAL
+        // ----------------------------------------------------
 
         std::cout
             << "\n"
@@ -1656,14 +2153,42 @@ int main()
             << "RLE BENCHMARK COMPLETE\n"
             << "============================================================\n\n"
 
-            << "Results:\n"
-            << "  ../results/rle_all_runs.csv\n\n"
+            << "Datasets successfully processed: "
+            << results.size()
+            << "/"
+            << DATASETS.size()
+            << "\n\n"
+
+            << "Run directory:\n  "
+            << RUN_DIR
+            << "\n\n"
+
+            << "Files created:\n"
+            << "  results.csv\n"
+            << "  results.json\n"
+            << "  logs/*.log\n"
+            << "  compressed/*.rle\n\n"
+
+            << "Master CSV:\n  "
+            << RESULT_ROOT
+            << "/rle_all_runs.csv\n\n"
 
             << "Timing methodology:\n"
-            << "  100 compression iterations\n"
-            << "  100 decompression iterations\n"
-            << "  Persistent worker threads\n"
-            << "  Reported time = total time / 100\n\n"
+            << "  "
+            << TIMING_ITERATIONS
+            << " compression iterations\n"
+
+            << "  "
+            << TIMING_ITERATIONS
+            << " decompression iterations\n"
+
+            << "  Warm-up before timing\n"
+
+            << "  Reported time = total time / "
+            << TIMING_ITERATIONS
+            << "\n\n"
+
+            << "Previous runs were NOT overwritten.\n"
 
             << "============================================================\n";
 
@@ -1674,7 +2199,7 @@ int main()
     ) {
 
         std::cerr
-            << "\nFATAL ERROR: "
+            << "\nFATAL ERROR:\n"
             << e.what()
             << "\n";
 

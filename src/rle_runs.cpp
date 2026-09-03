@@ -13,7 +13,7 @@ namespace fs = std::filesystem;
 // CONFIGURATION
 // ============================================================
 
-const int MIN_THREADS = 1;
+const int MIN_THREADS = 19;
 const int MAX_THREADS = 22;
 
 const int RUNS_PER_THREAD = 3;
